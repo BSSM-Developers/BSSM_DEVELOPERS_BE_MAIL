@@ -1,0 +1,108 @@
+name: Docker Build & Deploy
+
+on:
+  push:
+    branches:
+      - 'release-*'
+      - 'dev-*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '배포 환경'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - prod
+
+env:
+  MAIL_IMAGE: donghyunking/bssm-dev-mail
+
+jobs:
+  check-duplicate:
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.set-env.outputs.env }}
+    steps:
+      - name: Set deployment environment
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "env=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == release-* ]]; then
+            echo "env=prod" >> $GITHUB_OUTPUT
+          else
+            echo "env=staging" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: BSSM-Developers/BSSM_DEVELOPERS_INFRA
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+
+      - name: Fail if branch already deployed
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          TARGET="${{ steps.set-env.outputs.env }}"
+          MARKER_FILE="${TARGET}/mail/.deployed-branches"
+          if [ -f "$MARKER_FILE" ] && grep -qxF "$BRANCH" "$MARKER_FILE"; then
+            echo "::error::Branch '${BRANCH}'은(는) ${TARGET} 환경에 이미 배포되었습니다. 중복 배포를 방지하기 위해 워크플로우를 종료합니다."
+            exit 1
+          fi
+
+  build:
+    needs: check-duplicate
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      env: ${{ needs.check-duplicate.outputs.env }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.MAIL_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=mail
+          cache-to: type=gha,scope=mail,mode=max
+
+  update-infra:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TARGET: ${{ needs.build.outputs.env }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: BSSM-Developers/BSSM_DEVELOPERS_INFRA
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+
+      - name: Update mail image digest
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          sed -i -E "s|donghyunking/bssm-dev-mail@sha256:[a-f0-9]+|donghyunking/bssm-dev-mail@${DIGEST}|g" \
+            ${TARGET}/mail/deployment.yaml
+
+      - name: Commit and push
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          MARKER_FILE="${TARGET}/mail/.deployed-branches"
+          mkdir -p "${TARGET}/mail"
+          echo "$BRANCH" >> "$MARKER_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${TARGET}/mail/deployment.yaml "$MARKER_FILE"
+          git diff --staged --quiet && echo "변경 없음" && exit 0
+          git commit -m "chore :: [${TARGET}] mail 이미지 업데이트 (${GITHUB_SHA::7})"
+          git push
