@@ -28,6 +28,17 @@ type AuthConfig struct {
 	Secret string `mapstructure:"secret"`
 }
 
+func bindEnvs(v *viper.Viper) {
+	keys := []string{
+		"server.port",
+		"smtp.host", "smtp.port", "smtp.username", "smtp.password", "smtp.from",
+		"auth.secret",
+	}
+	for _, k := range keys {
+		_ = v.BindEnv(k)
+	}
+}
+
 func Load() *Config {
 	v := viper.New()
 	v.SetConfigName("config")
@@ -38,6 +49,7 @@ func Load() *Config {
 	v.SetEnvPrefix("MAIL")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	bindEnvs(v)
 
 	v.SetDefault("server.port", "8091")
 	v.SetDefault("smtp.host", "smtp.gmail.com")
